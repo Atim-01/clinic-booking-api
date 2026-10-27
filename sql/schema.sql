@@ -33,3 +33,13 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
   body JSONB NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Booking attempts table for rate limiting
+CREATE TABLE IF NOT EXISTS booking_attempts (
+  id BIGSERIAL PRIMARY KEY,
+  email TEXT NOT NULL,
+  attempted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_booking_attempts_email_time 
+  ON booking_attempts(email, attempted_at);

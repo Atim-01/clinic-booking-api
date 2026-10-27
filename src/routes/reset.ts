@@ -35,6 +35,7 @@ resetRouter.post('/reset', async (req: Request, res: Response) => {
       await client.query('TRUNCATE bookings CASCADE');
       await client.query('DELETE FROM slots');
       await client.query('DELETE FROM idempotency_keys');
+      await client.query('DELETE FROM booking_attempts');
 
       // Insert new slots
       for (const slot of slots as SlotInput[]) {

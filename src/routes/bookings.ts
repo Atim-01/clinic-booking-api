@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { pool } from '../db.js';
 import { generateBookingId } from '../ids.js';
 import { formatISO } from '../time.js';
-import { send404, send400, send409, send422 } from '../http/errors.js';
+import { send404, send400, send409, send422, send429 } from '../http/errors.js';
 import { isValidEmail, normalizeEmail } from '../lib/email.js';
 import {
   claimIdempotencyKey,
@@ -10,6 +10,7 @@ import {
   storeIdempotencyResponse,
   generateFingerprint,
 } from '../lib/idempotency.js';
+import { checkRateLimit } from '../lib/ratelimit.js';
 
 export const bookingsRouter = Router();
 
@@ -36,7 +37,7 @@ bookingsRouter.post('/bookings', async (req: Request, res: Response) => {
       if (!claimResult.claimed) {
         // Either replaying or need to poll
         if (claimResult.statusCode !== undefined) {
-          // Replay stored response
+          // Replay stored response (do NOT rate limit replays)
           return res.status(claimResult.statusCode).json(claimResult.body);
         }
 
@@ -51,7 +52,36 @@ bookingsRouter.post('/bookings', async (req: Request, res: Response) => {
 
     const { slot_id, name, email } = req.body;
 
-    // Validate required fields
+    // Extract and validate email FIRST for rate limiting
+    // Rate limit only applies if email is present, trimmed, lowercased, and valid format
+    let normalizedEmail: string | null = null;
+    let shouldRateLimit = false;
+
+    if (email && typeof email === 'string' && email.trim()) {
+      const trimmedEmail = email.trim();
+      if (isValidEmail(trimmedEmail)) {
+        normalizedEmail = normalizeEmail(trimmedEmail);
+        shouldRateLimit = true;
+      }
+    }
+
+    // Apply rate limit if we have a valid email
+    if (shouldRateLimit && normalizedEmail) {
+      const rateLimitResult = await checkRateLimit(pool, normalizedEmail);
+      if (!rateLimitResult.allowed) {
+        // Rate limit exceeded - 429
+        // Delete idempotency claim (so retry after waiting can succeed)
+        if (idempotencyKey && claimed) {
+          await storeIdempotencyResponse(pool, idempotencyKey, 429, {
+            error: 'too many attempts',
+          });
+        }
+        return send429(res, rateLimitResult.retryAfter!);
+      }
+      // Rate limit passed - attempt was inserted, continue with validation
+    }
+
+    // Now validate all required fields
     if (!slot_id || typeof slot_id !== 'string' || !slot_id.trim()) {
       const statusCode = 400;
       const body = { error: 'invalid booking' };
@@ -79,7 +109,7 @@ bookingsRouter.post('/bookings', async (req: Request, res: Response) => {
       return res.status(statusCode).json(body);
     }
 
-    // Validate email format
+    // Validate email format (again, for the error message)
     if (!isValidEmail(email)) {
       const statusCode = 400;
       const body = { error: 'invalid booking' };
@@ -90,7 +120,10 @@ bookingsRouter.post('/bookings', async (req: Request, res: Response) => {
     }
 
     const trimmedName = name.trim();
-    const normalizedEmail = normalizeEmail(email);
+    // normalizedEmail was already set above
+    if (!normalizedEmail) {
+      normalizedEmail = normalizeEmail(email);
+    }
 
     // Check if slot exists
     const slotResult = await pool.query(
