@@ -2,8 +2,14 @@ import { Router, Request, Response } from 'express';
 import { pool } from '../db.js';
 import { generateBookingId } from '../ids.js';
 import { formatISO } from '../time.js';
-import { send404, send400, send409 } from '../http/errors.js';
+import { send404, send400, send409, send422 } from '../http/errors.js';
 import { isValidEmail, normalizeEmail } from '../lib/email.js';
+import {
+  claimIdempotencyKey,
+  pollIdempotencyKey,
+  storeIdempotencyResponse,
+  generateFingerprint,
+} from '../lib/idempotency.js';
 
 export const bookingsRouter = Router();
 
@@ -18,25 +24,69 @@ interface Booking {
 
 // POST /bookings - Create a booking
 bookingsRouter.post('/bookings', async (req: Request, res: Response) => {
+  const idempotencyKey = req.get('Idempotency-Key');
+  let claimed = false;
+
   try {
+    // Handle idempotency
+    if (idempotencyKey) {
+      const fingerprint = generateFingerprint(req.body);
+      const claimResult = await claimIdempotencyKey(pool, idempotencyKey, fingerprint);
+
+      if (!claimResult.claimed) {
+        // Either replaying or need to poll
+        if (claimResult.statusCode !== undefined) {
+          // Replay stored response
+          return res.status(claimResult.statusCode).json(claimResult.body);
+        }
+
+        // Need to poll (winner still processing)
+        const pollResult = await pollIdempotencyKey(pool, idempotencyKey);
+        return res.status(pollResult.statusCode!).json(pollResult.body);
+      }
+
+      // We claimed the key
+      claimed = true;
+    }
+
     const { slot_id, name, email } = req.body;
 
     // Validate required fields
     if (!slot_id || typeof slot_id !== 'string' || !slot_id.trim()) {
-      return send400(res, 'invalid booking');
+      const statusCode = 400;
+      const body = { error: 'invalid booking' };
+      if (idempotencyKey && claimed) {
+        await storeIdempotencyResponse(pool, idempotencyKey, statusCode, body);
+      }
+      return res.status(statusCode).json(body);
     }
 
     if (!name || typeof name !== 'string' || !name.trim()) {
-      return send400(res, 'invalid booking');
+      const statusCode = 400;
+      const body = { error: 'invalid booking' };
+      if (idempotencyKey && claimed) {
+        await storeIdempotencyResponse(pool, idempotencyKey, statusCode, body);
+      }
+      return res.status(statusCode).json(body);
     }
 
     if (!email || typeof email !== 'string' || !email.trim()) {
-      return send400(res, 'invalid booking');
+      const statusCode = 400;
+      const body = { error: 'invalid booking' };
+      if (idempotencyKey && claimed) {
+        await storeIdempotencyResponse(pool, idempotencyKey, statusCode, body);
+      }
+      return res.status(statusCode).json(body);
     }
 
     // Validate email format
     if (!isValidEmail(email)) {
-      return send400(res, 'invalid booking');
+      const statusCode = 400;
+      const body = { error: 'invalid booking' };
+      if (idempotencyKey && claimed) {
+        await storeIdempotencyResponse(pool, idempotencyKey, statusCode, body);
+      }
+      return res.status(statusCode).json(body);
     }
 
     const trimmedName = name.trim();
@@ -49,7 +99,12 @@ bookingsRouter.post('/bookings', async (req: Request, res: Response) => {
     );
 
     if (slotResult.rows.length === 0) {
-      return send404(res, 'slot not found');
+      const statusCode = 404;
+      const body = { error: 'slot not found' };
+      if (idempotencyKey && claimed) {
+        await storeIdempotencyResponse(pool, idempotencyKey, statusCode, body);
+      }
+      return res.status(statusCode).json(body);
     }
 
     const slot = slotResult.rows[0];
@@ -58,7 +113,12 @@ bookingsRouter.post('/bookings', async (req: Request, res: Response) => {
 
     // Check if slot has already started
     if (now >= slotStart) {
-      return send400(res, 'slot already started');
+      const statusCode = 400;
+      const body = { error: 'slot already started' };
+      if (idempotencyKey && claimed) {
+        await storeIdempotencyResponse(pool, idempotencyKey, statusCode, body);
+      }
+      return res.status(statusCode).json(body);
     }
 
     const bookingId = generateBookingId();
@@ -80,13 +140,31 @@ bookingsRouter.post('/bookings', async (req: Request, res: Response) => {
       created_at: formatISO(new Date(row.created_at)),
     };
 
-    res.status(201).json(booking);
+    const statusCode = 201;
+    const body = booking;
+
+    if (idempotencyKey && claimed) {
+      await storeIdempotencyResponse(pool, idempotencyKey, statusCode, body);
+    }
+
+    res.status(statusCode).json(body);
   } catch (err: any) {
     // Handle unique constraint violation (slot already booked)
     if (err.code === '23505' && err.constraint === 'idx_bookings_slot_confirmed') {
-      return send409(res, 'slot already booked');
+      const statusCode = 409;
+      const body = { error: 'slot already booked' };
+      if (idempotencyKey && claimed) {
+        await storeIdempotencyResponse(pool, idempotencyKey, statusCode, body);
+      }
+      return res.status(statusCode).json(body);
     }
     console.error('Create booking error:', err);
+    
+    // For 500 errors, delete the idempotency claim
+    if (idempotencyKey && claimed) {
+      await storeIdempotencyResponse(pool, idempotencyKey, 500, { error: 'internal error' });
+    }
+    
     res.status(500).json({ error: 'internal error' });
   }
 });
@@ -118,6 +196,84 @@ bookingsRouter.get('/bookings/:id', async (req: Request, res: Response) => {
     res.json(booking);
   } catch (err) {
     console.error('Get booking error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// GET /bookings - List bookings by email with cursor pagination
+bookingsRouter.get('/bookings', async (req: Request, res: Response) => {
+  try {
+    const { email, limit, cursor } = req.query;
+
+    // Validate email
+    if (!email || typeof email !== 'string' || !email.trim()) {
+      return send400(res, 'invalid email');
+    }
+
+    if (!isValidEmail(email)) {
+      return send400(res, 'invalid email');
+    }
+
+    const normalizedEmail = normalizeEmail(email);
+
+    // Parse limit
+    let parsedLimit = 10; // default
+    if (limit) {
+      parsedLimit = parseInt(limit as string, 10);
+      if (isNaN(parsedLimit) || parsedLimit < 1 || parsedLimit > 50) {
+        return send400(res, 'invalid limit');
+      }
+    }
+
+    // Parse cursor (base64 encoded seq)
+    let cursorSeq = 0;
+    if (cursor && cursor !== '') {
+      try {
+        const decoded = Buffer.from(cursor as string, 'base64').toString('utf-8');
+        cursorSeq = parseInt(decoded, 10);
+        if (isNaN(cursorSeq)) {
+          return send400(res, 'invalid cursor');
+        }
+      } catch {
+        return send400(res, 'invalid cursor');
+      }
+    }
+
+    // Query bookings
+    const result = await pool.query(
+      `SELECT id, slot_id, name, email, status, created_at, seq
+       FROM bookings
+       WHERE email = $1 AND seq > $2
+       ORDER BY seq ASC
+       LIMIT $3`,
+      [normalizedEmail, cursorSeq, parsedLimit + 1] // Fetch one extra to check if there's a next page
+    );
+
+    const hasMore = result.rows.length > parsedLimit;
+    const bookings = result.rows.slice(0, parsedLimit);
+
+    const bookingsList = bookings.map((row) => ({
+      id: row.id,
+      slot_id: row.slot_id,
+      name: row.name,
+      email: row.email,
+      status: row.status,
+      created_at: formatISO(new Date(row.created_at)),
+      // Note: seq is NOT included in the response
+    }));
+
+    let nextCursor: string | null = null;
+    if (hasMore && bookings.length > 0) {
+      const lastSeq = bookings[bookings.length - 1].seq;
+      nextCursor = Buffer.from(String(lastSeq)).toString('base64');
+    }
+
+    res.json({
+      bookings: bookingsList,
+      next_cursor: nextCursor,
+    });
+  } catch (err) {
+    console.error('List bookings error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });

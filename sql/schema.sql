@@ -24,3 +24,12 @@ CREATE INDEX IF NOT EXISTS idx_bookings_email_seq ON bookings(email, seq);
 -- Partial unique index: only one confirmed booking per slot
 CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_slot_confirmed 
   ON bookings(slot_id) WHERE status = 'confirmed';
+
+-- Idempotency keys table
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  key TEXT PRIMARY KEY,
+  fingerprint TEXT NOT NULL,
+  status_code INT NULL,
+  body JSONB NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
