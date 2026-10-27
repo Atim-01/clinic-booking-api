@@ -1,6 +1,9 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { corsMiddleware } from './http/cors.js';
 import { send404, send400, send500 } from './http/errors.js';
+import { resetRouter } from './routes/reset.js';
+import { slotsRouter } from './routes/slots.js';
+import { bookingsRouter } from './routes/bookings.js';
 
 export const app = express();
 
@@ -22,6 +25,11 @@ app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
   }
   next(err);
 });
+
+// Routes
+app.use(resetRouter);
+app.use(slotsRouter);
+app.use(bookingsRouter);
 
 // 404 handler for unknown routes
 app.use((_req: Request, res: Response) => {
