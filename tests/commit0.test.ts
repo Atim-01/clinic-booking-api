@@ -11,7 +11,7 @@ describe('Commit 0: Express scaffold', () => {
   });
 
   it('Unknown route returns 404 not found', async () => {
-    const res = await request(app).get('/unknown');
+    const res = await request(app).get('/unknown').set('X-API-Key', 'test-api-key-for-testing');
     assert.strictEqual(res.status, 404);
     assert.deepStrictEqual(res.body, { error: 'not found' });
   });
@@ -20,6 +20,7 @@ describe('Commit 0: Express scaffold', () => {
     const res = await request(app)
       .post('/bookings')
       .set('Content-Type', 'application/json')
+      .set('X-API-Key', 'test-api-key-for-testing')
       .send('{');
     assert.strictEqual(res.status, 400);
     assert.deepStrictEqual(res.body, { error: 'invalid json' });

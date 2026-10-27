@@ -2,7 +2,8 @@ import { Router, Request, Response } from 'express';
 import { pool } from '../db.js';
 import { generateBookingId } from '../ids.js';
 import { formatISO } from '../time.js';
-import { send404 } from '../http/errors.js';
+import { send404, send400 } from '../http/errors.js';
+import { isValidEmail, normalizeEmail } from '../lib/email.js';
 
 export const bookingsRouter = Router();
 
@@ -20,15 +21,53 @@ bookingsRouter.post('/bookings', async (req: Request, res: Response) => {
   try {
     const { slot_id, name, email } = req.body;
 
+    // Validate required fields
+    if (!slot_id || typeof slot_id !== 'string' || !slot_id.trim()) {
+      return send400(res, 'invalid booking');
+    }
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return send400(res, 'invalid booking');
+    }
+
+    if (!email || typeof email !== 'string' || !email.trim()) {
+      return send400(res, 'invalid booking');
+    }
+
+    // Validate email format
+    if (!isValidEmail(email)) {
+      return send400(res, 'invalid booking');
+    }
+
+    const trimmedName = name.trim();
+    const normalizedEmail = normalizeEmail(email);
+
+    // Check if slot exists
+    const slotResult = await pool.query(
+      'SELECT id, start_ts FROM slots WHERE id = $1',
+      [slot_id.trim()]
+    );
+
+    if (slotResult.rows.length === 0) {
+      return send404(res, 'slot not found');
+    }
+
+    const slot = slotResult.rows[0];
+    const slotStart = new Date(slot.start_ts);
+    const now = new Date();
+
+    // Check if slot has already started
+    if (now >= slotStart) {
+      return send400(res, 'slot already started');
+    }
+
     const bookingId = generateBookingId();
-    const trimmedName = name?.trim();
-    const trimmedEmail = email?.trim().toLowerCase();
 
     const result = await pool.query(
       `INSERT INTO bookings (id, slot_id, name, email, status, created_at)
        VALUES ($1, $2, $3, $4, 'confirmed', now())
        RETURNING id, slot_id, name, email, status, created_at`,
-      [bookingId, slot_id, trimmedName, trimmedEmail]
+      [bookingId, slot_id.trim(), trimmedName, normalizedEmail]
     );
 
     const row = result.rows[0];

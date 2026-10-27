@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { corsMiddleware } from './http/cors.js';
+import { authMiddleware } from './http/auth.js';
 import { send404, send400, send500 } from './http/errors.js';
 import { resetRouter } from './routes/reset.js';
 import { slotsRouter } from './routes/slots.js';
@@ -7,13 +8,16 @@ import { bookingsRouter } from './routes/bookings.js';
 
 export const app = express();
 
-// Middleware order: CORS first, then auth (later), then JSON parser
+// Middleware order: CORS first, then auth, then JSON parser
 app.use(corsMiddleware);
 
 // Health endpoint (no auth required)
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ ok: true });
 });
+
+// Auth middleware (after CORS, before JSON parser)
+app.use(authMiddleware);
 
 // JSON parser with error handling
 app.use(express.json());
