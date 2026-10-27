@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { pool } from '../db.js';
 import { generateBookingId } from '../ids.js';
 import { formatISO } from '../time.js';
-import { send404, send400 } from '../http/errors.js';
+import { send404, send400, send409 } from '../http/errors.js';
 import { isValidEmail, normalizeEmail } from '../lib/email.js';
 
 export const bookingsRouter = Router();
@@ -81,7 +81,11 @@ bookingsRouter.post('/bookings', async (req: Request, res: Response) => {
     };
 
     res.status(201).json(booking);
-  } catch (err) {
+  } catch (err: any) {
+    // Handle unique constraint violation (slot already booked)
+    if (err.code === '23505' && err.constraint === 'idx_bookings_slot_confirmed') {
+      return send409(res, 'slot already booked');
+    }
     console.error('Create booking error:', err);
     res.status(500).json({ error: 'internal error' });
   }
@@ -114,6 +118,52 @@ bookingsRouter.get('/bookings/:id', async (req: Request, res: Response) => {
     res.json(booking);
   } catch (err) {
     console.error('Get booking error:', err);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+// DELETE /bookings/:id - Cancel a booking
+bookingsRouter.delete('/bookings/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    // Try to cancel: UPDATE to cancelled WHERE status is confirmed, RETURNING *
+    const result = await pool.query(
+      `UPDATE bookings 
+       SET status = 'cancelled' 
+       WHERE id = $1 AND status = 'confirmed' 
+       RETURNING id, slot_id, name, email, status, created_at`,
+      [id]
+    );
+
+    // If a row was returned, the cancellation succeeded
+    if (result.rows.length > 0) {
+      const row = result.rows[0];
+      const booking: Booking = {
+        id: row.id,
+        slot_id: row.slot_id,
+        name: row.name,
+        email: row.email,
+        status: row.status,
+        created_at: formatISO(new Date(row.created_at)),
+      };
+      return res.json(booking);
+    }
+
+    // No row returned - either booking doesn't exist or is already cancelled
+    const checkResult = await pool.query(
+      'SELECT id, status FROM bookings WHERE id = $1',
+      [id]
+    );
+
+    if (checkResult.rows.length === 0) {
+      return send404(res, 'booking not found');
+    }
+
+    // Booking exists but is already cancelled
+    return send409(res, 'already cancelled');
+  } catch (err) {
+    console.error('Cancel booking error:', err);
     res.status(500).json({ error: 'internal error' });
   }
 });

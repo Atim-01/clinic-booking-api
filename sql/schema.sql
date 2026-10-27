@@ -20,3 +20,7 @@ CREATE TABLE IF NOT EXISTS bookings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bookings_email_seq ON bookings(email, seq);
+
+-- Partial unique index: only one confirmed booking per slot
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_slot_confirmed 
+  ON bookings(slot_id) WHERE status = 'confirmed';
