@@ -30,8 +30,13 @@ async function seed() {
 
     console.log('Creating demo slots...');
     
-    // Create slots for the next 7 days, two providers, multiple time slots per day
-    const providers = ['Dr. Sarah Johnson', 'Dr. Michael Chen'];
+    // Create slots for the next 60 days, four providers, multiple time slots per day
+    const providers = [
+      'Dr. Adaeze Okafor',
+      'Dr. Chinedu Eze',
+      'Dr. Amina Bello',
+      'Dr. Tunde Adebayo',
+    ];
     const slots: Array<{ id: string; provider: string; start: Date; end: Date }> = [];
     
     const now = new Date();
@@ -39,7 +44,7 @@ async function seed() {
     startDate.setDate(startDate.getDate() + 1); // Start tomorrow
     startDate.setHours(9, 0, 0, 0); // 9 AM
 
-    for (let day = 0; day < 7; day++) {
+    for (let day = 0; day < 60; day++) {
       const date = new Date(startDate);
       date.setDate(date.getDate() + day);
 
